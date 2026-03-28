@@ -1,44 +1,54 @@
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    // Cloudflare automatically decodes URL-encoded characters here
+    // Cloudflare handles the URL-decoding of the 'url' parameter automatically
     const targetUrl = url.searchParams.get('url');
 
-    // 1. Basic usage check
     if (!targetUrl) {
-      return new Response('Usage: /?url=https://example.com/video.m3u8', { 
-        status: 400,
-        headers: { "Content-Type": "text/plain" }
-      });
+      return new Response('Usage: /?url=ENCODED_URL', { status: 400 });
     }
 
     try {
-      const baseUrl = targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1);
+      // 1. Properly determine the Base URL for relative segments
+      // We strip the query parameters from the targetUrl to get a clean path
+      const urlObj = new URL(targetUrl);
+      const baseUrl = urlObj.origin + urlObj.pathname.substring(0, urlObj.pathname.lastIndexOf('/') + 1);
 
-      // 2. Define headers required by the source
       const headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
         "Referer": "https://profamouslife.com/",
         "Origin": "https://profamouslife.com",
       };
 
-      // 3. Fetch the content
       const response = await fetch(targetUrl, { headers });
 
       if (!response.ok) {
-        return new Response(`Source returned error: ${response.status}`, { status: response.status });
+        return new Response(`Source Error: ${response.status}`, { status: response.status });
       }
 
-      // 4. Handle M3U8 Rewriting
+      // 2. M3U8 Rewriting Logic
       if (targetUrl.includes('.m3u8')) {
         let manifest = await response.text();
 
-        // Rewrite .ts lines to point back to this worker WITHOUT base64
+        // This regex catches lines ending in .ts or lines containing .ts? (for tokens)
         const rewrittenManifest = manifest.replace(/^(.*\.ts.*)$/gm, (match) => {
           const segment = match.trim();
-          const fullSegmentUrl = segment.startsWith('http') ? segment : baseUrl + segment;
+          let fullSegmentUrl;
           
-          // Use encodeURIComponent to safely nest the URL
+          if (segment.startsWith('http')) {
+            fullSegmentUrl = segment;
+          } else {
+            // Join base path with segment name, then re-attach original tokens if needed
+            // If the source needs the SAME md5/expires for segments, we append them here:
+            const separator = segment.includes('?') ? '&' : '?';
+            fullSegmentUrl = baseUrl + segment;
+            
+            // Re-append source parameters if they aren't in the segment line already
+            if (!segment.includes('md5=') && urlObj.search) {
+               fullSegmentUrl += (segment.includes('?') ? '&' : '?') + urlObj.search.substring(1);
+            }
+          }
+          
           return `?url=${encodeURIComponent(fullSegmentUrl)}`;
         });
 
@@ -50,7 +60,7 @@ export default {
         });
       }
 
-      // 5. Handle TS Segments (Direct stream)
+      // 3. TS Segment Streaming
       return new Response(response.body, {
         headers: { 
           "Content-Type": response.headers.get("Content-Type") || "video/mp2t",
