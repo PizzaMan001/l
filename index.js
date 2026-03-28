@@ -1,42 +1,45 @@
 export default {
   async fetch(request, env, ctx) {
     const url = new URL(request.url);
-    let targetUrl = url.searchParams.get('url');
+    // Cloudflare automatically decodes URL-encoded characters here
+    const targetUrl = url.searchParams.get('url');
 
+    // 1. Basic usage check
     if (!targetUrl) {
-      return new Response('Usage: /?url=URL_OR_BASE64', { status: 400 });
+      return new Response('Usage: /?url=https://example.com/video.m3u8', { 
+        status: 400,
+        headers: { "Content-Type": "text/plain" }
+      });
     }
 
     try {
-      // 1. Try to decode if it looks like Base64, otherwise use as is
-      if (!targetUrl.startsWith('http')) {
-        targetUrl = atob(targetUrl);
-      }
-
       const baseUrl = targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1);
 
+      // 2. Define headers required by the source
       const headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
         "Referer": "https://profamouslife.com/",
         "Origin": "https://profamouslife.com",
       };
 
+      // 3. Fetch the content
       const response = await fetch(targetUrl, { headers });
 
       if (!response.ok) {
-        return new Response(`Source Error: ${response.status}`, { status: response.status });
+        return new Response(`Source returned error: ${response.status}`, { status: response.status });
       }
 
-      // 2. Handle M3U8 Rewriting
+      // 4. Handle M3U8 Rewriting
       if (targetUrl.includes('.m3u8')) {
         let manifest = await response.text();
 
-        // Rewrite paths: matches lines NOT starting with # (the actual TS/M3U8 links)
-        const rewrittenManifest = manifest.replace(/^(?![#\s]).+/gm, (match) => {
+        // Rewrite .ts lines to point back to this worker WITHOUT base64
+        const rewrittenManifest = manifest.replace(/^(.*\.ts.*)$/gm, (match) => {
           const segment = match.trim();
           const fullSegmentUrl = segment.startsWith('http') ? segment : baseUrl + segment;
-          // Use btoa to ensure the query string doesn't break the URL structure
-          return `${url.origin}/?url=${btoa(fullSegmentUrl)}`;
+          
+          // Use encodeURIComponent to safely nest the URL
+          return `?url=${encodeURIComponent(fullSegmentUrl)}`;
         });
 
         return new Response(rewrittenManifest, {
@@ -47,7 +50,7 @@ export default {
         });
       }
 
-      // 3. Handle TS Segments
+      // 5. Handle TS Segments (Direct stream)
       return new Response(response.body, {
         headers: { 
           "Content-Type": response.headers.get("Content-Type") || "video/mp2t",
