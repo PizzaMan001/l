@@ -1,66 +1,59 @@
-const express = require('express');
-const axios = require('axios');
-const app = express();
+export default {
+  async fetch(request, env, ctx) {
+    const url = new URL(request.url);
+    const encodedUrl = url.searchParams.get('url');
 
-const PORT = process.env.PORT || 3000;
-
-app.get('/proxy', async (req, res) => {
-    const { url } = req.query;
-
-    if (!url) {
-        return res.status(400).send("Error: Missing 'url' parameter (Base64 encoded).");
+    // 1. Basic usage check
+    if (!encodedUrl) {
+      return new Response('Usage: /?url=' + btoa('https://example.com/video.m3u8'), { status: 400 });
     }
 
     try {
-        // 1. Decode the URL from Base64
-        const decodedUrl = Buffer.from(url, 'base64').toString('utf-8');
-        
-        // 2. Prepare headers (Mirroring your PHP logic)
-        const config = {
-            headers: {
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-                "Referer": "https://profamouslife.com/",
-                "Origin": "https://profamouslife.com",
-            },
-            responseType: decodedUrl.includes('.m3u8') ? 'text' : 'arraybuffer',
-            timeout: 15000,
-            validateStatus: false 
-        };
+      // 2. Decode the target URL
+      const targetUrl = atob(encodedUrl);
+      const baseUrl = targetUrl.substring(0, targetUrl.lastIndexOf('/') + 1);
 
-        const response = await axios.get(decodedUrl, config);
+      // 3. Define headers required by the source
+      const headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+        "Referer": "https://profamouslife.com/",
+        "Origin": "https://profamouslife.com",
+      };
 
-        // Forward the status code from the source
-        if (response.status !== 200) {
-            return res.status(response.status).send(`Source Error: ${response.status}`);
+      // 4. Fetch the content from the source
+      const response = await fetch(targetUrl, { headers });
+
+      if (!response.ok) {
+        return new Response(`Source returned error: ${response.status}`, { status: response.status });
+      }
+
+      // 5. Handle M3U8 Rewriting
+      if (targetUrl.includes('.m3u8')) {
+        let manifest = await response.text();
+
+        // Rewrite .ts lines to point back to THIS worker
+        // Logic: Replace filename.ts with /?url=BASE64(full_url)
+        const rewrittenManifest = manifest.replace(/^(.*\.ts.*)$/gm, (match) => {
+          const segment = match.trim();
+          const fullSegmentUrl = segment.startsWith('http') ? segment : baseUrl + segment;
+          return `?url=${btoa(fullSegmentUrl)}`;
+        });
+
+        return new Response(rewrittenManifest, {
+          headers: { "Content-Type": "application/vnd.apple.mpegurl" }
+        });
+      }
+
+      // 6. Handle TS Segments (Direct stream)
+      return new Response(response.body, {
+        headers: { 
+          "Content-Type": response.headers.get("Content-Type") || "video/mp2t",
+          "Access-Control-Allow-Origin": "*" // Ensure CORS is open for players
         }
+      });
 
-        // 3. Handle Playlist Rewriting (.m3u8)
-        if (decodedUrl.includes('.m3u8')) {
-            const baseUrl = decodedUrl.substring(0, decodedUrl.lastIndexOf('/') + 1);
-            
-            // Rewrite relative .ts paths to proxied Base64 paths
-            const rewritten = response.data.replace(/^(.*\.ts.*)$/gm, (match) => {
-                const segmentUrl = match.trim().startsWith('http') ? match.trim() : baseUrl + match.trim();
-                const encodedSegment = Buffer.from(segmentUrl).toString('base64');
-                return `proxy?url=${encodedSegment}`;
-            });
-
-            res.setHeader('Content-Type', 'application/vnd.apple.mpegurl');
-            return res.send(rewritten);
-        }
-
-        // 4. Handle Video Segments (.ts)
-        res.setHeader('Content-Type', response.headers['content-type'] || 'video/mp2t');
-        return res.send(response.data);
-
-    } catch (error) {
-        res.status(500).send("Proxy Exception: " + error.message);
+    } catch (e) {
+      return new Response("Proxy Error: " + e.message, { status: 500 });
     }
-});
-
-// Root route for usage instructions
-app.get('/', (req, res) => {
-    res.send("HLS Proxy is running. Usage: /proxy?url=[BASE64_ENCODED_URL]");
-});
-
-app.listen(PORT, () => console.log(`Proxy active on port ${PORT}`));
+  }
+};
